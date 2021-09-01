@@ -1,7 +1,11 @@
 
 #include "stdafx.h"
 
+#include "odx_helper.h"
+
 int main() {
 
-return(0);
+    auto ret = CalculateCBufferByteSize(1000);
+
+    return(0);
 }
