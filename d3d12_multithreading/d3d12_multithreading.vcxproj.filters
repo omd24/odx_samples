@@ -27,6 +27,9 @@
     <ClInclude Include="odx_sample.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="win32_app.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="_d3d12_mt_main.cpp">
@@ -36,6 +39,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="odx_sample.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="win32_app.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

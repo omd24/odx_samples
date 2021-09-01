@@ -18,7 +18,8 @@
 #include <wrl.h>
 #include <process.h>
 
-//#include <shellapi.h>   // -- work with command line arguments
+// -- include helpers to work with command line arguments
+#include <shellapi.h>
 
 static constexpr UINT FrameCount = 3;
 
