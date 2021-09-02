@@ -35,4 +35,11 @@ static constexpr int CmdlistPre = 0;
 static constexpr int CmdlistMid = 1;
 static constexpr int CmdlistPost = 2;
 
+// -- helper functions:
+template <typename T, size_t N>
+inline constexpr size_t
+ArrayCount (T (&array)[N]) {
+    return N;
+}
+
 
