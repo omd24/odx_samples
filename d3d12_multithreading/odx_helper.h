@@ -158,7 +158,7 @@ SetNameIndexed (ID3D12Object * obj, LPCWSTR name, UINT index) {}
 #define NAME_D3D12_OBJECT(x) SetName((x).Get(), L#x)
 #define NAME_D3D12_OBJECT_INDEXED(x, n) SetNameIndexed((x)[n].Get(), L#x, n)
 
-inline UINT
+inline constexpr UINT
 CalculateCBufferByteSize (UINT byte_size) {
     UINT ret =
         (byte_size + (D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT - 1)) &
