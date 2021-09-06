@@ -91,19 +91,19 @@ private:
     static OdxMultithreading * s_app;
 
     // -- frame resources
-    FrameResource * frame_resources[FrameCount];
-    FrameResource * current_frame_resource;
-    int current_frame_resource_index;
+    FrameResource * frame_resources_[FrameCount];
+    FrameResource * current_frame_resource_;
+    int current_frame_resource_index_;
 
     struct ThreadParameter {
         int thread_index;
     };
-    ThreadParameter thread_parameters[NumContexts];
+    ThreadParameter thread_parameters_[NumContexts];
 
     void WorkerThread (int thread_index);
-    void SetCommonPSO (ID3D12GraphicsCommandList * cmdlist);
+    void SetCommonPipelineState (ID3D12GraphicsCommandList * cmdlist);
 
-    void LoadPipeLine ();
+    void LoadPipeLine (HWND hwnd);
     void LoadAssets ();
     void RestoreD3DResources ();
     void ReleaseD3DResources ();

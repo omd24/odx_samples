@@ -21,6 +21,8 @@
 // -- include helpers to work with command line arguments
 #include <shellapi.h>
 
+#define SINGLETHREADED  FALSE
+
 static constexpr UINT FrameCount = 3;
 
 static constexpr UINT NumContexts = 3;
