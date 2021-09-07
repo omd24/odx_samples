@@ -1,6 +1,7 @@
 #pragma once
 
 #include "odx_helper.h"
+#include "win32_app.h"
 
 struct OdxSample {
 private:

@@ -1,15 +1,9 @@
 
 #include "stdafx.h"
+#include "odx_multithreading.h"
 
-#include "odx_helper.h"
-
-int main() {
-
-    auto ret = CalculateCBufferByteSize(1000);
-    auto constexpr x = sizeof(DXGI_FORMAT_R32G32B32A32_FLOAT);
-    auto constexpr xx = sizeof(float);
-    auto constexpr xxx = sizeof(double);
-
-
-    return(0);
+_Use_decl_annotations_ int WINAPI
+WinMain (HINSTANCE instance, HINSTANCE, LPSTR, int cmdshow) {
+    OdxMultithreading sample(1280, 720, L"O D3D12 Multithreading App");
+    return Win32App::Run(&sample, instance, cmdshow);
 }

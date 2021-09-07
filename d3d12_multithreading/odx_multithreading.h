@@ -103,7 +103,7 @@ private:
     void WorkerThread (int thread_index);
     void SetCommonPipelineState (ID3D12GraphicsCommandList * cmdlist);
 
-    void LoadPipeLine (HWND hwnd);
+    void LoadPipeLine ();
     void LoadAssets ();
     void RestoreD3DResources ();
     void ReleaseD3DResources ();

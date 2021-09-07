@@ -1,6 +1,9 @@
 #include "stdafx.h"
 #include "odx_multithreading.h"
 #include "frame_resource.h"
+#include "win32_app.h"
+
+OdxMultithreading * OdxMultithreading::s_app = nullptr;
 
 // -- body of a worker thread:
 // -- index is an int from 0 to NumContexts
@@ -145,7 +148,7 @@ void OdxMultithreading::SetCommonPipelineState (
 }
 //
 // -- load rendering pipeline dependencies
-void OdxMultithreading::LoadPipeLine (HWND hwnd) {
+void OdxMultithreading::LoadPipeLine () {
     UINT dxgi_factory_flags = 0;
 #if defined(_DEBUG)
     // NOTE(omid): Enabling debug layer after device creation
@@ -210,14 +213,14 @@ void OdxMultithreading::LoadPipeLine (HWND hwnd) {
     ComPtr<IDXGISwapChain1> swap_chain;
     ThrowIfFailed(factory->CreateSwapChainForHwnd(
         cmdqueue_.Get(),    // swapchain needs the queue to force a flush
-        hwnd,
+        Win32App::GetHwnd(),
         &swapchain_desc,
         nullptr, nullptr,
         &swap_chain
     ));
     // -- this sample does not support fullscreen transitions
     ThrowIfFailed(factory->MakeWindowAssociation(
-        hwnd,
+        Win32App::GetHwnd(),
         DXGI_MWA_NO_ALT_ENTER
     ));
 
@@ -392,17 +395,18 @@ void OdxMultithreading::LoadAssets () {
 #else
         UINT compile_flags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
 #endif
+        auto str = GetAssetFullPath(L"shaders.hlsl");
         ThrowIfFailed(D3DCompileFromFile(
             GetAssetFullPath(L"shaders.hlsl").c_str(),
             nullptr, nullptr,
-            "VSMAIN", "vs_5_0",
+            "VSMain", "vs_5_0",
             compile_flags, 0,
             &vertex_shader, nullptr
         ));
         ThrowIfFailed(D3DCompileFromFile(
             GetAssetFullPath(L"shaders.hlsl").c_str(),
             nullptr, nullptr,
-            "PSMAIN", "ps_5_0",
+            "PSMain", "ps_5_0",
             compile_flags, 0,
             &pixel_shader, nullptr
         ));
@@ -873,7 +877,7 @@ void OdxMultithreading::LoadContexts () {
 #if !SINGLETHREADED
     struct ThreadWrapper {
         static unsigned int WINAPI thunk (LPVOID param_ptr) {
-            ThreadParameter * param = reinterpret_cast<ThreadParameter *>(param);
+            ThreadParameter * param = reinterpret_cast<ThreadParameter *>(param_ptr);
             OdxMultithreading::Get()->WorkerThread(param->thread_index);
             return 0;
         }
@@ -903,26 +907,329 @@ void OdxMultithreading::LoadContexts () {
             ThreadWrapper::thunk,
             reinterpret_cast<LPVOID>(&thread_parameters_[i]),
             0, nullptr
-        ));
+            ));
         assert(worker_begin_render_frame_[i] != NULL);
         assert(worker_finished_render_frame_[i] != NULL);
         assert(thread_handles_[i] != NULL);
     }
 #endif // !SINGLETHREADED
 }
-void OdxMultithreading::RestoreD3DResources ();
-void OdxMultithreading::ReleaseD3DResources ();
-void OdxMultithreading::WaitForGpu ();
-void OdxMultithreading::BeginFrame ();
-void OdxMultithreading::MidFrame ();
-void OdxMultithreading::EndFrame ();
-OdxMultithreading::OdxMultithreading (UINT width, UINT height, std::wstring name);
-OdxMultithreading::~OdxMultithreading ();
+// -- tear down D3D resources and reinit them
+void OdxMultithreading::RestoreD3DResources () {
+    // -- give gpu a chance to finish its execution in progress
+    try {
+        WaitForGpu();
+    } catch (HrException&) {
+        // -- do nothing, current attached adapter is unresponsive
+    }
+    ReleaseD3DResources();
+    OnInit();
+}
+void OdxMultithreading::ReleaseD3DResources () {
+    fence_.Reset();
+    ResetComPtrArray(&render_targets_);
+    cmdqueue_.Reset();
+    swapchain_.Reset();
+    device_.Reset();
+}
+void OdxMultithreading::WaitForGpu () {
+    // -- schedule a signal command in the queue
+    ThrowIfFailed(cmdqueue_->Signal(fence_.Get(), fence_value_));
 
-void OdxMultithreading::OnInit ();
-void OdxMultithreading::OnUpdate ();
-void OdxMultithreading::OnRender ();
-void OdxMultithreading::OnDestroy ();
-void OdxMultithreading::OnKeyDown (UINT8 key);
-void OdxMultithreading::OnKeyUp (UINT8 key);
+    // -- wait until the fence has been processed
+    ThrowIfFailed(fence_->SetEventOnCompletion(fence_value_, fence_event_));
+    WaitForSingleObjectEx(fence_event_, INFINITE, FALSE);
+}
+//
+// -- assemble the CmdlistPre list of commands
+void OdxMultithreading::BeginFrame () {
+    current_frame_resource_->Init();
+
+    // -- indicate that back buffer will be used as a render target
+    current_frame_resource_->cmdlists_[CmdlistPre]->ResourceBarrier(
+        1, &CD3DX12_RESOURCE_BARRIER::Transition(
+        render_targets_[frame_index_].Get(),
+        D3D12_RESOURCE_STATE_PRESENT,
+        D3D12_RESOURCE_STATE_RENDER_TARGET
+    ));
+
+    // -- clear render target and depstncl
+    float const clear_color [] = {0.0f, 0.0f, 0.0f, 1.0f};
+    CD3DX12_CPU_DESCRIPTOR_HANDLE rtv_handle(
+        rtv_heap_->GetCPUDescriptorHandleForHeapStart(),
+        frame_index_,
+        rtv_descriptor_size_
+    );
+    current_frame_resource_->cmdlists_[CmdlistPre]->ClearRenderTargetView(
+        rtv_handle,
+        clear_color,
+        0, nullptr
+    );
+    current_frame_resource_->cmdlists_[CmdlistPre]->ClearDepthStencilView(
+        dsv_heap_->GetCPUDescriptorHandleForHeapStart(),
+        D3D12_CLEAR_FLAG_DEPTH,
+        1.0, 0, 0, nullptr
+    );
+    ThrowIfFailed(
+        current_frame_resource_->cmdlists_[CmdlistPre]->Close()
+    );
+}
+//
+// -- assemble the CmdlistMid list of commands
+void OdxMultithreading::MidFrame () {
+    // -- transition the smap from shadpw pass to readable in the scene pass
+    current_frame_resource_->SwapBarriers();
+    ThrowIfFailed(
+        current_frame_resource_->cmdlists_[CmdlistMid]->Close()
+    );
+}
+//
+// -- assemble the CmdlistPost list of commands
+void OdxMultithreading::EndFrame () {
+    current_frame_resource_->Finish();
+
+    // -- indicate that backbuffer will no be used to present
+    current_frame_resource_->cmdlists_[CmdlistPost]->ResourceBarrier(
+        1, &CD3DX12_RESOURCE_BARRIER::Transition(
+        render_targets_[frame_index_].Get(),
+        D3D12_RESOURCE_STATE_RENDER_TARGET,
+        D3D12_RESOURCE_STATE_PRESENT
+    ));
+    ThrowIfFailed(
+        current_frame_resource_->cmdlists_[CmdlistPost]->Close()
+    );
+}
+
+OdxMultithreading::OdxMultithreading (UINT width, UINT height, std::wstring name) :
+    OdxSample(width, height, name),
+    frame_index_(0),
+    viewport_(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)),
+    scissor_rect_(0, 0, static_cast<LONG>(width), static_cast<LONG>(height)),
+    keyboard_input_(), title_count_(0), cpu_time_(0),
+    fence_value_(0), rtv_descriptor_size_(0),
+    current_frame_resource_index_(0),
+    current_frame_resource_(nullptr)
+{
+    s_app = this;
+    keyboard_input_.animate = true;
+    ThrowIfFailed(DXGIDeclareAdapterRemovalSupport());
+}
+OdxMultithreading::~OdxMultithreading () {
+    s_app = nullptr;
+}
+
+void OdxMultithreading::OnInit () {
+    LoadPipeLine();
+    LoadAssets();
+    LoadContexts();
+}
+void OdxMultithreading::OnUpdate () {
+    timer_.Tick(NULL);
+
+    PIXSetMarker(cmdqueue_.Get(), 0, L"Getting last completed fence...");
+
+    // -- get current gpu progress against submitted workload.
+    // -- resources still scheduled for gpu execution cannot be modified
+    UINT64 const last_completed_fence = fence_->GetCompletedValue();
+
+    // -- move to next frame
+    current_frame_resource_index_ =
+        (current_frame_resource_index_ + 1) % FrameCount;
+    current_frame_resource_ = frame_resources_[current_frame_resource_index_];
+
+    // -- make sure current frame resource is not in use by gpu
+    // -- otherwise wait for it to complete
+    if (current_frame_resource_->fence_value_ > last_completed_fence) {
+        HANDLE event_handle = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (nullptr == event_handle)
+            ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
+        ThrowIfFailed(fence_->SetEventOnCompletion(
+            current_frame_resource_->fence_value_, event_handle
+        ));
+        WaitForSingleObject(event_handle, INFINITE);
+        CloseHandle(event_handle);
+    }
+
+    cpu_timer_.Tick(NULL);
+    float frame_time = static_cast<float>(timer_.GetElapsedSeconds());
+    float frame_change = 2.0f * frame_time;
+
+    if (keyboard_input_.left_arrow_pressed)
+        camera_.RotateYaw(-frame_change);
+    if (keyboard_input_.right_arrow_pressed)
+        camera_.RotateYaw(frame_change);
+    if (keyboard_input_.up_arrow_pressed)
+        camera_.RotatePitch(frame_change);
+    if (keyboard_input_.down_arrow_pressed)
+        camera_.RotatePitch(-frame_change);
+
+    if (keyboard_input_.animate)
+        for (int i = 0; i < NumLights; ++i) {
+            float direction = frame_change * powf(-1.0f, i);
+            XMStoreFloat4(&lights_[i].position, XMVector4Transform(XMLoadFloat4(
+                &lights_[i].position),
+                XMMatrixRotationY(direction)
+            ));
+
+            XMVECTOR eye = XMLoadFloat4(&lights_[i].position);
+            XMVECTOR at = XMVectorSet(0.0f, 8.0f, 0.0f, 0.0f);
+            XMStoreFloat4(
+                &lights_[i].direction,
+                XMVector3Normalize(XMVectorSubtract(at, eye))
+            );
+            XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+            light_cameras_[i].Set(eye, at, up);
+
+            light_cameras_[i].Get3DViewProjMatrices(
+                &lights_[i].view,
+                &lights_[i].projection,
+                90.0f,
+                static_cast<float>(width_),
+                static_cast<float>(height_)
+            );
+        }
+
+    current_frame_resource_->WriteCBuffers(
+        &viewport_, &camera_, light_cameras_, lights_
+    );
+}
+void OdxMultithreading::OnRender () {
+    try {
+        BeginFrame();
+#if SINGLETHREADED
+        for (int i = 0; i < NumContexts; ++i)
+            WorkerThread(i);
+        MidFrame();
+        EndFrame();
+        cmdqueue_->ExecuteCommandLists(
+            ArrayCount(current_frame_resource_->batch_submit_),
+            current_frame_resource_->batch_submit_
+        );
+#else
+        // -- tell each worker to start drawing
+        for (int i = 0; i < NumContexts; ++i)
+            SetEvent(worker_begin_render_frame_[i]);
+
+        MidFrame();
+        EndFrame();
+
+        WaitForMultipleObjects(
+            NumContexts,
+            worker_finish_shadow_pass_,
+            TRUE, INFINITE
+        );
+
+        // -- we can choose to use ExecuteCmdLists on one thread (any thread)
+        // -- or use ExecuteCmdList from multiple threads
+        cmdqueue_->ExecuteCommandLists(
+            NumContexts + 2,
+            current_frame_resource_->batch_submit_ /* submit Pre, Mid and Shadow */
+        );
+        WaitForMultipleObjects(
+            NumContexts,
+            worker_finished_render_frame_,
+            TRUE, INFINITE
+        );
+
+        // -- submit remaining cmd lists
+        cmdqueue_->ExecuteCommandLists(
+            ArrayCount(current_frame_resource_->batch_submit_) - NumContexts - 2,
+            current_frame_resource_->batch_submit_ + NumContexts + 2
+        );
+#endif
+        cpu_timer_.Tick(NULL);
+        if (TitlebarThrottle == title_count_) {
+            WCHAR str[64];
+            swprintf_s(str, L"%.4f CPU", cpu_time_ / title_count_);
+            SetCustomWindowText(str, Win32App::GetHwnd());
+            title_count_ = 0;
+            cpu_time_ = 0;
+        } else {
+            ++title_count_;
+            cpu_time_ += cpu_timer_.GetElapsedSeconds() * 1000;
+            cpu_timer_.ResetElaspedTime();
+        }
+
+        // -- present and update frame index
+        PIXBeginEvent(cmdqueue_.Get(), 0, L"Presenting to screen");
+        ThrowIfFailed(swapchain_->Present(1, 0));
+        PIXEndEvent(cmdqueue_.Get());
+        frame_index_ = swapchain_->GetCurrentBackBufferIndex();
+
+        // -- signal and increment fence value
+        current_frame_resource_->fence_value_ = fence_value_;
+        ThrowIfFailed(cmdqueue_->Signal(fence_.Get(), fence_value_));
+        ++fence_value_;
+    } catch (HrException & e) {
+        if (
+            e.Error() == DXGI_ERROR_DEVICE_REMOVED ||
+            e.Error() == DXGI_ERROR_DEVICE_RESET
+        ) {
+            RestoreD3DResources();
+        } else
+            throw;
+    }
+}
+void OdxMultithreading::OnDestroy () {
+    // -- ensure that gpu is no longer referencing resources
+    {
+        UINT64 const fence_to_wait_for = fence_value_;
+        UINT64 const last_completed_fence = fence_->GetCompletedValue();
+        // -- signal and increment fence value
+        ThrowIfFailed(cmdqueue_->Signal(fence_.Get(), fence_value_));
+        ++fence_value_;
+        // -- wait until previous frame is finished
+        if (last_completed_fence < fence_to_wait_for) {
+            ThrowIfFailed(fence_->SetEventOnCompletion(fence_to_wait_for, fence_event_));
+            WaitForSingleObject(fence_event_, INFINITE);
+        }
+        CloseHandle(fence_event_);
+    }
+
+    // -- close thread events and thread handles
+    for (int i = 0; i < NumContexts; ++i) {
+        CloseHandle(worker_begin_render_frame_[i]);
+        CloseHandle(worker_finish_shadow_pass_[i]);
+        CloseHandle(worker_finished_render_frame_[i]);
+        CloseHandle(thread_handles_[i]);
+    }
+
+    for (int i = 0; i < ArrayCount(frame_resources_); ++i)
+        delete frame_resources_[i];
+}
+void OdxMultithreading::OnKeyDown (UINT8 key) {
+    switch (key) {
+    case VK_LEFT:
+        keyboard_input_.left_arrow_pressed = true;
+        break;
+    case VK_RIGHT:
+        keyboard_input_.right_arrow_pressed = true;
+        break;
+    case VK_UP:
+        keyboard_input_.up_arrow_pressed = true;
+        break;
+    case VK_DOWN:
+        keyboard_input_.down_arrow_pressed = true;
+        break;
+    case VK_SPACE:
+        keyboard_input_.animate = !keyboard_input_.animate;
+        break;
+    }
+}
+void OdxMultithreading::OnKeyUp (UINT8 key) {
+    switch (key) {
+    case VK_LEFT:
+        keyboard_input_.left_arrow_pressed = false;
+        break;
+    case VK_RIGHT:
+        keyboard_input_.right_arrow_pressed = false;
+        break;
+    case VK_UP:
+        keyboard_input_.up_arrow_pressed = false;
+        break;
+    case VK_DOWN:
+        keyboard_input_.down_arrow_pressed = false;
+        break;
+    }
+}
 
